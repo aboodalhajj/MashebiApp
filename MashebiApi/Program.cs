@@ -47,10 +47,15 @@ app.MapGet("/health", () => Results.Ok("healthy"));
 using (var scope = app.Services.CreateScope())
 {
     var db = scope.ServiceProvider.GetRequiredService<AppDbContext>();
-    // 👇 بدل ملاحظات الهجرات بهذا السطر البسيط
-    await db.Database.EnsureCreatedAsync();
+    try
+    {
+        await db.Database.MigrateAsync(); // بدل EnsureCreatedAsync
+    }
+    catch (Exception ex)
+    {
+        Console.Error.WriteLine("DB migrate failed: " + ex.Message);
+    }
 }
-
 app.Run();
 
 
