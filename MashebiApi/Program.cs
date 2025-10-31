@@ -48,6 +48,14 @@ builder.Services.AddDbContext<AppDbContext>(opt =>
 
 var app = builder.Build();
 
+// بعد var app = builder.Build();
+using (var scope = app.Services.CreateScope())
+{
+    var db = scope.ServiceProvider.GetRequiredService<AppDbContext>();
+    db.Database.Migrate();
+}
+
+
 // اختياري: نقطة فحص
 app.MapGet("/", () => new { ok = true, db = "neon", ts = DateTimeOffset.UtcNow });
 
