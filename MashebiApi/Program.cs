@@ -10,12 +10,15 @@ using System.Text;
 var builder = WebApplication.CreateBuilder(args);
 builder.Configuration.AddEnvironmentVariables();
 
-// Dapper: دعم أسماء snake_case
+// دابر: دعم تطابق أسماء snake_case مع الخصائص
 Dapper.DefaultTypeMap.MatchNamesWithUnderscores = true;
 
-// اتصال Neon (كما ركبناه سابقًا)
-var databaseUrl = builder.Configuration["DATABASE_URL"]!;
-string BuildConnStringFromUri(string url, bool strictVerify = true)
+// ===== اتصال Neon (DATABASE_URL بصيغة libpq URI) =====
+var databaseUrl = builder.Configuration["DATABASE_URL"];
+if (string.IsNullOrWhiteSpace(databaseUrl))
+    throw new InvalidOperationException("DATABASE_URL is missing");
+
+static string BuildConnStringFromUri(string url, bool strictVerify = true)
 {
     var u = new Uri(url);
     var parts = Uri.UnescapeDataString(u.UserInfo).Split(':', 2);
@@ -36,24 +39,57 @@ string BuildConnStringFromUri(string url, bool strictVerify = true)
     };
     return csb.ConnectionString;
 }
+
 var connString = BuildConnStringFromUri(databaseUrl, strictVerify: true);
-var ds = new NpgsqlDataSourceBuilder(connString).Build();
-builder.Services.AddSingleton(ds);
+var dataSource = new NpgsqlDataSourceBuilder(connString).Build();
+builder.Services.AddSingleton(dataSource);
 
-// CORS للتجربة (ضيّقها لاحقًا)
-builder.Services.AddCors(opt => opt.AddPolicy("AllowDev",
-    p => p.AllowAnyOrigin().AllowAnyHeader().AllowAnyMethod()));
+// ===== CORS (وسّعها مؤقتًا أثناء التطوير) =====
+builder.Services.AddCors(opt =>
+{
+    opt.AddPolicy("AllowDev", p => p
+        .AllowAnyOrigin()
+        .AllowAnyHeader()
+        .AllowAnyMethod());
+});
 
+// ===== JWT =====
+// ضَع القيم في Railway → Variables: JWT__Key, JWT__Issuer, JWT__Audience
+var jwtKey      = builder.Configuration["JWT__Key"]      ?? "change-this-key";
+var jwtIssuer   = builder.Configuration["JWT__Issuer"]   ?? "MashebiApi";
+var jwtAudience = builder.Configuration["JWT__Audience"] ?? "MashebiApp";
+var signingKey  = new SymmetricSecurityKey(Encoding.UTF8.GetBytes(jwtKey));
+
+builder.Services
+    .AddAuthentication(options =>
+    {
+        options.DefaultAuthenticateScheme = JwtBearerDefaults.AuthenticationScheme;
+        options.DefaultChallengeScheme    = JwtBearerDefaults.AuthenticationScheme;
+    })
+    .AddJwtBearer(o =>
+    {
+        o.TokenValidationParameters = new TokenValidationParameters
+        {
+            ValidateIssuer = true,   ValidIssuer   = jwtIssuer,
+            ValidateAudience = true, ValidAudience = jwtAudience,
+            ValidateIssuerSigningKey = true, IssuerSigningKey = signingKey,
+            ValidateLifetime = true,
+            ClockSkew = TimeSpan.FromMinutes(2)
+        };
+    });
+
+builder.Services.AddAuthorization();
 
 var app = builder.Build();
+
 app.UseCors("AllowDev");
 app.UseAuthentication();
 app.UseAuthorization();
 
-// Health
+// ===== Health =====
 app.MapGet("/health", () => Results.Ok("OK"));
 
-// ====== LOGIN (الحساب العام) ======
+// ===== LOGIN (الحساب العام في جدول accounts) =====
 app.MapPost("/api/auth/login", async (LoginDto dto, NpgsqlDataSource ds) =>
 {
     dto.Username = dto.Username?.Trim() ?? "";
@@ -62,7 +98,7 @@ app.MapPost("/api/auth/login", async (LoginDto dto, NpgsqlDataSource ds) =>
 
     await using var conn = await ds.OpenConnectionAsync();
 
-    // التحقق عبر bcrypt/pgcrypto: password_hash = crypt(@p, password_hash)
+    // التحقق عبر pgcrypto/bcrypt: password_hash = crypt(@p, password_hash)
     var sql = @"
         select id, account_name, username, email, is_active
         from public.accounts
@@ -70,12 +106,12 @@ app.MapPost("/api/auth/login", async (LoginDto dto, NpgsqlDataSource ds) =>
           and is_active = true
           and password_hash = crypt(@p, password_hash)
         limit 1;";
-    var acc = await conn.QueryFirstOrDefaultAsync(sql, new { u = dto.Username, p = dto.Password });
 
+    var acc = await conn.QueryFirstOrDefaultAsync(sql, new { u = dto.Username, p = dto.Password });
     if (acc is null)
         return Results.Unauthorized();
 
-    // اصنع JWT
+    // إنشاء JWT
     string token = CreateJwtToken(
         issuer: jwtIssuer,
         audience: jwtAudience,
@@ -92,13 +128,19 @@ app.MapPost("/api/auth/login", async (LoginDto dto, NpgsqlDataSource ds) =>
     return Results.Ok(new
     {
         token,
-        accountId = (int)acc.id,
-        username = (string)acc.username,
+        accountId   = (int)acc.id,
+        username    = (string)acc.username,
         accountName = (string)acc.account_name,
-        email = (string)acc.email
+        email       = (string)acc.email
     });
 });
 
+// Root check
+app.MapGet("/", () => new { ok = true, db = "neon", ts = DateTimeOffset.UtcNow });
+
+app.Run();
+
+// ===== Helpers / DTO =====
 static string CreateJwtToken(string issuer, string audience, SymmetricSecurityKey signingKey,
     IEnumerable<Claim> claims, DateTime expires)
 {
@@ -107,16 +149,6 @@ static string CreateJwtToken(string issuer, string audience, SymmetricSecurityKe
     return new JwtSecurityTokenHandler().WriteToken(jwt);
 }
 
-// ===== (اختياري الآن) اجعل عناصر /api/items محمية بالتوكن لاحقًا =====
-// var items = app.MapGroup("/api/items").RequireAuthorization();
-// ... بقية مسارات items عندك الآن مفتوحة، ممكن نحميها لاحقًا.
-
-// Root check
-app.MapGet("/", () => new { ok = true, db = "neon", ts = DateTimeOffset.UtcNow });
-
-app.Run();
-
-// DTO
 public class LoginDto
 {
     public string? Username { get; set; }
