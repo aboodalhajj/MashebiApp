@@ -4,78 +4,83 @@ using Npgsql;
 var builder = WebApplication.CreateBuilder(args);
 builder.Configuration.AddEnvironmentVariables();
 
-// يحوّل DATABASE_URL لصيغة Npgsql عند توفره
-static string? FromDatabaseUrl(string? url)
+// 1) المفضل: خذ الرابط من متغير بيئة DATABASE_URL (صيغة URI) عند النشر
+var databaseUrl = builder.Configuration["DATABASE_URL"];
+
+// 2) إن لم يوجد، استخدم الصيغة المباشرة (Npgsql) — جرّب محليًا فقط
+var fallbackNpgsql = "Host=ep-super-lab-agh3uq8x-pooler.c-2.eu-central-1.aws.neon.tech;Port=5432;Database=DataMashebiApi;Username=neondb_owner;Password=npg_eT96qAVPUYlb;SSL Mode=VerifyFull;Trust Server Certificate=false;Channel Binding=Require;Timeout=15;Command Timeout=30;Maximum Pool Size=50;Keepalive=30";
+
+// دالة تحويل URI إلى Npgsql Connection String (لو استخدمت DATABASE_URL)
+static string ToNpgsqlFromUri(string uri)
 {
-    if (string.IsNullOrWhiteSpace(url)) return null;
-    var u = new Uri(url);
-    var up = u.UserInfo.Split(':', 2);
-    return new NpgsqlConnectionStringBuilder
+    var u = new Uri(uri);
+    var creds = Uri.UnescapeDataString(u.UserInfo).Split(':', 2);
+    var csb = new NpgsqlConnectionStringBuilder
     {
         Host = u.Host,
-        Port = u.Port > 0 ? u.Port : 5432,
-        Database = u.AbsolutePath.Trim('/'),
-        Username = up.Length > 0 ? up[0] : "",
-        Password = up.Length > 1 ? up[1] : "",
-        SslMode = SslMode.Require
-    }.ConnectionString;
+        Port = u.IsDefaultPort ? 5432 : u.Port,
+        Database = u.AbsolutePath.TrimStart('/'),
+        Username = creds[0],
+        Password = creds.Length > 1 ? creds[1] : "",
+        SslMode = SslMode.VerifyFull,
+        TrustServerCertificate = false,
+        ChannelBinding = ChannelBinding.Require,
+        Timeout = 15,
+        CommandTimeout = 30,
+        MaxPoolSize = 50,
+        KeepAlive = 30
+    };
+    return csb.ConnectionString;
 }
 
-// اجلب الاتصال من البيئة (Neon عبر DATABASE_URL أو CONNECTION_STRING)
-// اجلب الاتصال من البيئة (Neon عبر DATABASE_URL أو CONNECTION_STRING)
-var cs = builder.Configuration["CONNECTION_STRING"]
-         ?? FromDatabaseUrl(builder.Configuration["DATABASE_URL"]);
+var connString = !string.IsNullOrWhiteSpace(databaseUrl)
+    ? ToNpgsqlFromUri(databaseUrl)
+    : fallbackNpgsql;
 
-if (string.IsNullOrWhiteSpace(cs))
+builder.Services.AddDbContext<AppDbContext>(opt =>
 {
-    Console.WriteLine("WARNING: No DB connection. Using InMemory.");
-    builder.Services.AddDbContext<AppDbContext>(o => o.UseInMemoryDatabase("dev"));
-}
-else
-{
-    builder.Services.AddDbContext<AppDbContext>(o => o.UseNpgsql(cs));
-}
+    opt.UseNpgsql(connString, b =>
+    {
+        // اختياري: تسمية جدول سجل الترقيات ومخطط مخصص
+        // b.MigrationsHistoryTable("__efmigrations_history", "app");
+    });
+});
 
 var app = builder.Build();
 
-// فحوصات
-app.MapGet("/ping", () => Results.Ok(new { status = "ok", time = DateTime.UtcNow }));
-app.MapGet("/health", () => Results.Ok("healthy"));
+// اختياري: نقطة فحص
+app.MapGet("/", () => new { ok = true, db = "neon", ts = DateTimeOffset.UtcNow });
 
-// CRUD بسيطة (مثالك الحالي)
-
-using (var scope = app.Services.CreateScope())
+// مثال CRUD بسيط (إن رغبت): TODOs
+app.MapGet("/todos", async (AppDbContext db) => await db.Todos.OrderByDescending(t => t.Id).Take(200).ToListAsync());
+app.MapPost("/todos", async (AppDbContext db, TodoCreate dto) =>
 {
-    var db = scope.ServiceProvider.GetRequiredService<AppDbContext>();
-    try
-    {
-        await db.Database.MigrateAsync(); // بدل EnsureCreatedAsync
-    }
-    catch (Exception ex)
-    {
-        Console.Error.WriteLine("DB migrate failed: " + ex.Message);
-    }
-}
+    var t = new Todo { Title = dto.Title?.Trim() ?? "", CreatedAt = DateTime.UtcNow };
+    db.Add(t);
+    await db.SaveChangesAsync();
+    return Results.Created($"/todos/{t.Id}", t);
+});
+app.MapPut("/todos/{id:long}", async (AppDbContext db, long id, TodoUpdate dto) =>
+{
+    var t = await db.Todos.FindAsync(id);
+    if (t is null) return Results.NotFound();
+    if (dto.Title is not null) t.Title = dto.Title.Trim();
+    if (dto.IsDone.HasValue) t.IsDone = dto.IsDone.Value;
+    await db.SaveChangesAsync();
+    return Results.NoContent();
+});
+app.MapDelete("/todos/{id:long}", async (AppDbContext db, long id) =>
+{
+    var t = await db.Todos.FindAsync(id);
+    if (t is null) return Results.NotFound();
+    db.Remove(t);
+    await db.SaveChangesAsync();
+    return Results.NoContent();
+});
+
 app.Run();
 
-
-#region EF داخل نفس الملف
-public class AppDbContext(DbContextOptions<AppDbContext> options) : DbContext(options)
-{
-    public DbSet<Todo> Todos => Set<Todo>();
-    protected override void OnModelCreating(ModelBuilder modelBuilder)
-    {
-        modelBuilder.Entity<Todo>(e =>
-        {
-            e.ToTable("todos");                  // اسم جدول صغير واضح
-            e.HasKey(x => x.Id);
-            e.Property(x => x.Id).ValueGeneratedOnAdd();
-            e.Property(x => x.Title).IsRequired().HasMaxLength(200);
-            e.HasIndex(x => x.IsDone);
-        });
-    }
-}
-
+// ====== النماذج والسياق ======
 public class Todo
 {
     public long Id { get; set; }
@@ -85,4 +90,22 @@ public class Todo
 }
 
 public record TodoCreate(string? Title);
-#endregion
+public record TodoUpdate(string? Title, bool? IsDone);
+
+public class AppDbContext(DbContextOptions<AppDbContext> options) : DbContext(options)
+{
+    public DbSet<Todo> Todos => Set<Todo>();
+
+    protected override void OnModelCreating(ModelBuilder mb)
+    {
+        mb.Entity<Todo>(e =>
+        {
+            e.ToTable("todos");
+            e.HasKey(x => x.Id);
+            e.Property(x => x.Id).UseIdentityByDefaultColumn();
+            e.Property(x => x.Title).IsRequired().HasMaxLength(200);
+            e.HasIndex(x => x.IsDone);
+            e.Property(x => x.CreatedAt).HasColumnType("timestamp with time zone");
+        });
+    }
+}
