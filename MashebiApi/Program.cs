@@ -58,7 +58,8 @@ using (var scope = app.Services.CreateScope())
     db.Database.Migrate();
 }
 
-app.MapGet("/", () => new { ok = true, db = "neon", ts = DateTimeOffset.UtcNow });
+app.MapGet("/health", () => Results.Ok("OK"));
+
 
 
 app.Run();
