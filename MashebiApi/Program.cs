@@ -10,10 +10,10 @@ using System.Text;
 var builder = WebApplication.CreateBuilder(args);
 builder.Configuration.AddEnvironmentVariables();
 
-// دابر: دعم تطابق أسماء snake_case مع الخصائص
+// دابر: طابق snake_case مع خصائص C#
 Dapper.DefaultTypeMap.MatchNamesWithUnderscores = true;
 
-// ===== اتصال Neon (DATABASE_URL بصيغة libpq URI) =====
+// ===== اتصال Neon عبر DATABASE_URL =====
 var databaseUrl = builder.Configuration["DATABASE_URL"];
 if (string.IsNullOrWhiteSpace(databaseUrl))
     throw new InvalidOperationException("DATABASE_URL is missing");
@@ -30,7 +30,6 @@ static string BuildConnStringFromUri(string url, bool strictVerify = true)
         Username = parts[0],
         Password = parts.Length > 1 ? parts[1] : "",
         SslMode = strictVerify ? SslMode.VerifyFull : SslMode.Require,
-        TrustServerCertificate = strictVerify ? false : true,
         ChannelBinding = ChannelBinding.Require,
         Timeout = 15,
         CommandTimeout = 30,
@@ -44,17 +43,13 @@ var connString = BuildConnStringFromUri(databaseUrl, strictVerify: true);
 var dataSource = new NpgsqlDataSourceBuilder(connString).Build();
 builder.Services.AddSingleton(dataSource);
 
-// ===== CORS (وسّعها مؤقتًا أثناء التطوير) =====
+// ===== CORS (وسّع مؤقتًا) =====
 builder.Services.AddCors(opt =>
 {
-    opt.AddPolicy("AllowDev", p => p
-        .AllowAnyOrigin()
-        .AllowAnyHeader()
-        .AllowAnyMethod());
+    opt.AddPolicy("AllowDev", p => p.AllowAnyOrigin().AllowAnyHeader().AllowAnyMethod());
 });
 
 // ===== JWT =====
-// ضَع القيم في Railway → Variables: JWT__Key, JWT__Issuer, JWT__Audience
 var jwtKey      = builder.Configuration["JWT__Key"]      ?? "change-this-key";
 var jwtIssuer   = builder.Configuration["JWT__Issuer"]   ?? "MashebiApi";
 var jwtAudience = builder.Configuration["JWT__Audience"] ?? "MashebiApp";
@@ -89,8 +84,7 @@ app.UseAuthorization();
 // ===== Health =====
 app.MapGet("/health", () => Results.Ok("OK"));
 
-// ===== LOGIN (الحساب العام في جدول accounts) =====
-// ===== LOGIN (الحساب العام في جدول accounts) =====
+// ===== LOGIN (الحساب العام) =====
 app.MapPost("/api/auth/login", async (LoginDto dto, NpgsqlDataSource ds, ILoggerFactory lf) =>
 {
     var log = lf.CreateLogger("Auth");
@@ -104,7 +98,6 @@ app.MapPost("/api/auth/login", async (LoginDto dto, NpgsqlDataSource ds, ILogger
     {
         await using var conn = await ds.OpenConnectionAsync();
 
-        // ✅ استخدم أسماء أعمدة مُسمّاة (aliases) للربط القوي
         const string sql = @"
             select 
                 id              as ""Id"",
@@ -121,9 +114,8 @@ app.MapPost("/api/auth/login", async (LoginDto dto, NpgsqlDataSource ds, ILogger
         var acc = await conn.QueryFirstOrDefaultAsync<AccountRow>(sql, new { u = dto.Username, p = pwd });
 
         if (acc is null)
-            return Results.Unauthorized(); // 401
+            return Results.Unauthorized();
 
-        // إنشاء JWT
         string token = CreateJwtToken(
             issuer: jwtIssuer,
             audience: jwtAudience,
@@ -148,10 +140,12 @@ app.MapPost("/api/auth/login", async (LoginDto dto, NpgsqlDataSource ds, ILogger
     }
     catch (PostgresException pgex)
     {
-        // لو Crypt() غير معروف -> غالبًا pgcrypto غير مُفعل: SQLSTATE 42883
+        // 42883 = function does not exist (مثلاً crypt غير موجود -> فعّل pgcrypto)
         log.LogError(pgex, "Postgres error during login. SqlState={SqlState}", pgex.SqlState);
-        var hint = pgex.SqlState == "42883" ? "الوظيفة crypt غير موجودة. فعّل امتداد pgcrypto في نفس قاعدة البيانات." : "خطأ قاعدة بيانات.";
-        return Results.Problem(hint, statusCode: 500);
+        var msg = pgex.SqlState == "42883"
+                    ? "الوظيفة crypt غير موجودة. فعّل امتداد pgcrypto في نفس قاعدة البيانات."
+                    : "خطأ قاعدة بيانات أثناء تسجيل الدخول.";
+        return Results.Problem(msg, statusCode: 500);
     }
     catch (Exception ex)
     {
@@ -160,7 +154,26 @@ app.MapPost("/api/auth/login", async (LoginDto dto, NpgsqlDataSource ds, ILogger
     }
 });
 
-// ===== DTO قوي النوع لصف accounts =====
+// Root check
+app.MapGet("/", () => new { ok = true, db = "neon", ts = DateTimeOffset.UtcNow });
+
+app.Run();
+
+// ===== Helpers / DTOs =====
+static string CreateJwtToken(string issuer, string audience, SymmetricSecurityKey signingKey,
+    IEnumerable<Claim> claims, DateTime expires)
+{
+    var creds = new SigningCredentials(signingKey, SecurityAlgorithms.HmacSha256);
+    var jwt = new JwtSecurityToken(issuer, audience, claims, expires: expires, signingCredentials: creds);
+    return new JwtSecurityTokenHandler().WriteToken(jwt);
+}
+
+public class LoginDto
+{
+    public string? Username { get; set; }
+    public string? Password { get; set; }
+}
+
 public class AccountRow
 {
     public int    Id          { get; set; }
