@@ -66,6 +66,15 @@ builder.Services.AddAuthentication(JwtBearerDefaults.AuthenticationScheme)
             ClockSkew = TimeSpan.FromMinutes(2)
         };
     });
+// ...
+builder.Services.AddAuthentication(JwtBearerDefaults.AuthenticationScheme)
+    .AddJwtBearer(o =>
+    {
+        // إعدادات JWT كما عندك
+    });
+
+// ⬅️ ضروري مع UseAuthorization()
+builder.Services.AddAuthorization();
 
 var app = builder.Build();
 app.UseCors("AllowDev");
