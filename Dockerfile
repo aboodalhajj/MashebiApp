@@ -1,15 +1,19 @@
-# ---------- Build ----------
+# ===== Build =====
 FROM mcr.microsoft.com/dotnet/sdk:9.0 AS build
 WORKDIR /src
 COPY . .
-WORKDIR /src/MashebiApi
 RUN dotnet restore
-RUN dotnet publish MashebiApi.csproj -c Release -o /app/publish /p:UseAppHost=false
+RUN dotnet publish -c Release -o /app /p:UseAppHost=false
 
-# ---------- Runtime ----------
-FROM mcr.microsoft.com/dotnet/aspnet:9.0 AS runtime
+# ===== Run =====
+FROM mcr.microsoft.com/dotnet/aspnet:9.0
 WORKDIR /app
-ENV ASPNETCORE_URLS=http://0.0.0.0:${PORT:-8080}
+COPY --from=build /app .
+
+# Railway يمرر PORT، ونحتاج أن نستمع على 0.0.0.0
+ENV ASPNETCORE_URLS=http://0.0.0.0:8080
 EXPOSE 8080
-COPY --from=build /app/publish .
-ENTRYPOINT ["dotnet", "MashebiApi.dll"]
+
+# عدّل الاسم لو كان مشروعك باسم مختلف
+ENTRYPOINT ["dotnet","MashebiApi.dll"]
+
