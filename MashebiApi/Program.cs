@@ -44,37 +44,6 @@ builder.Services.AddSingleton(ds);
 builder.Services.AddCors(opt => opt.AddPolicy("AllowDev",
     p => p.AllowAnyOrigin().AllowAnyHeader().AllowAnyMethod()));
 
-// ===== JWT =====
-// أضِف هذه المتغيرات في Railway → Variables
-var jwtKey = builder.Configuration["JWT__Key"] ?? "change-this-key";
-var jwtIssuer = builder.Configuration["JWT__Issuer"] ?? "MashebiApi";
-var jwtAudience = builder.Configuration["JWT__Audience"] ?? "MashebiApp";
-
-var signingKey = new SymmetricSecurityKey(Encoding.UTF8.GetBytes(jwtKey));
-builder.Services.AddAuthentication(JwtBearerDefaults.AuthenticationScheme)
-    .AddJwtBearer(o =>
-    {
-        o.TokenValidationParameters = new TokenValidationParameters
-        {
-            ValidateIssuer = true,
-            ValidIssuer = jwtIssuer,
-            ValidateAudience = true,
-            ValidAudience = jwtAudience,
-            ValidateIssuerSigningKey = true,
-            IssuerSigningKey = signingKey,
-            ValidateLifetime = true,
-            ClockSkew = TimeSpan.FromMinutes(2)
-        };
-    });
-// ...
-builder.Services.AddAuthentication(JwtBearerDefaults.AuthenticationScheme)
-    .AddJwtBearer(o =>
-    {
-        // إعدادات JWT كما عندك
-    });
-
-// ⬅️ ضروري مع UseAuthorization()
-builder.Services.AddAuthorization();
 
 var app = builder.Build();
 app.UseCors("AllowDev");
