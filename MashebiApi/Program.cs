@@ -90,67 +90,82 @@ app.UseAuthorization();
 app.MapGet("/health", () => Results.Ok("OK"));
 
 // ===== LOGIN (الحساب العام في جدول accounts) =====
-app.MapPost("/api/auth/login", async (LoginDto dto, NpgsqlDataSource ds) =>
+// ===== LOGIN (الحساب العام في جدول accounts) =====
+app.MapPost("/api/auth/login", async (LoginDto dto, NpgsqlDataSource ds, ILoggerFactory lf) =>
 {
+    var log = lf.CreateLogger("Auth");
     dto.Username = dto.Username?.Trim() ?? "";
-    if (string.IsNullOrWhiteSpace(dto.Username) || string.IsNullOrWhiteSpace(dto.Password))
+    var pwd = dto.Password ?? "";
+
+    if (string.IsNullOrWhiteSpace(dto.Username) || string.IsNullOrWhiteSpace(pwd))
         return Results.BadRequest(new { message = "أدخل اسم المستخدم وكلمة المرور." });
 
-    await using var conn = await ds.OpenConnectionAsync();
-
-    // التحقق عبر pgcrypto/bcrypt: password_hash = crypt(@p, password_hash)
-    var sql = @"
-        select id, account_name, username, email, is_active
-        from public.accounts
-        where lower(username) = lower(@u)
-          and is_active = true
-          and password_hash = crypt(@p, password_hash)
-        limit 1;";
-
-    var acc = await conn.QueryFirstOrDefaultAsync(sql, new { u = dto.Username, p = dto.Password });
-    if (acc is null)
-        return Results.Unauthorized();
-
-    // إنشاء JWT
-    string token = CreateJwtToken(
-        issuer: jwtIssuer,
-        audience: jwtAudience,
-        signingKey: signingKey,
-        claims: new[]
-        {
-            new Claim(JwtRegisteredClaimNames.Sub, $"{acc.id}"),
-            new Claim(JwtRegisteredClaimNames.UniqueName, (string)acc.username),
-            new Claim("account_id", $"{acc.id}"),
-            new Claim("account_name", (string)acc.account_name)
-        },
-        expires: DateTime.UtcNow.AddHours(12));
-
-    return Results.Ok(new
+    try
     {
-        token,
-        accountId   = (int)acc.id,
-        username    = (string)acc.username,
-        accountName = (string)acc.account_name,
-        email       = (string)acc.email
-    });
+        await using var conn = await ds.OpenConnectionAsync();
+
+        // ✅ استخدم أسماء أعمدة مُسمّاة (aliases) للربط القوي
+        const string sql = @"
+            select 
+                id              as ""Id"",
+                account_name    as ""AccountName"",
+                username        as ""Username"",
+                email           as ""Email"",
+                is_active       as ""IsActive""
+            from public.accounts
+            where lower(username) = lower(@u)
+              and is_active = true
+              and password_hash = crypt(@p, password_hash)
+            limit 1;";
+
+        var acc = await conn.QueryFirstOrDefaultAsync<AccountRow>(sql, new { u = dto.Username, p = pwd });
+
+        if (acc is null)
+            return Results.Unauthorized(); // 401
+
+        // إنشاء JWT
+        string token = CreateJwtToken(
+            issuer: jwtIssuer,
+            audience: jwtAudience,
+            signingKey: signingKey,
+            claims: new[]
+            {
+                new Claim(JwtRegisteredClaimNames.Sub, $"{acc.Id}"),
+                new Claim(JwtRegisteredClaimNames.UniqueName, acc.Username),
+                new Claim("account_id", $"{acc.Id}"),
+                new Claim("account_name", acc.AccountName)
+            },
+            expires: DateTime.UtcNow.AddHours(12));
+
+        return Results.Ok(new
+        {
+            token,
+            accountId   = acc.Id,
+            username    = acc.Username,
+            accountName = acc.AccountName,
+            email       = acc.Email
+        });
+    }
+    catch (PostgresException pgex)
+    {
+        // لو Crypt() غير معروف -> غالبًا pgcrypto غير مُفعل: SQLSTATE 42883
+        log.LogError(pgex, "Postgres error during login. SqlState={SqlState}", pgex.SqlState);
+        var hint = pgex.SqlState == "42883" ? "الوظيفة crypt غير موجودة. فعّل امتداد pgcrypto في نفس قاعدة البيانات." : "خطأ قاعدة بيانات.";
+        return Results.Problem(hint, statusCode: 500);
+    }
+    catch (Exception ex)
+    {
+        log.LogError(ex, "Unhandled error during login");
+        return Results.Problem("حدث خطأ غير متوقع أثناء تسجيل الدخول.", statusCode: 500);
+    }
 });
 
-// Root check
-app.MapGet("/", () => new { ok = true, db = "neon", ts = DateTimeOffset.UtcNow });
-
-app.Run();
-
-// ===== Helpers / DTO =====
-static string CreateJwtToken(string issuer, string audience, SymmetricSecurityKey signingKey,
-    IEnumerable<Claim> claims, DateTime expires)
+// ===== DTO قوي النوع لصف accounts =====
+public class AccountRow
 {
-    var creds = new SigningCredentials(signingKey, SecurityAlgorithms.HmacSha256);
-    var jwt = new JwtSecurityToken(issuer, audience, claims, expires: expires, signingCredentials: creds);
-    return new JwtSecurityTokenHandler().WriteToken(jwt);
-}
-
-public class LoginDto
-{
-    public string? Username { get; set; }
-    public string? Password { get; set; }
+    public int    Id          { get; set; }
+    public string AccountName { get; set; } = "";
+    public string Username    { get; set; } = "";
+    public string Email       { get; set; } = "";
+    public bool   IsActive    { get; set; }
 }
